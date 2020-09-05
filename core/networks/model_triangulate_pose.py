@@ -77,8 +77,9 @@ class Model_triangulate_pose(nn.Module):
         images, K_ms, K_inv_ms = inputs
         K, K_inv = K_ms[:,0,:,:], K_inv_ms[:,0,:,:]
         assert (images.shape[1] == 3)
-        img_h, img_w = int(images.shape[2] / 2), images.shape[3] 
-        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:,:]
+        stride = 2
+        img_h, img_w = int(images.shape[2] / stride), images.shape[3] 
+        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:img_h*2,:]
         batch_size = img1.shape[0]
 
         if self.mode == 'depth':
