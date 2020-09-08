@@ -81,7 +81,7 @@ def train(cfg):
             kitti_raw_dataset.prepare_data_mp(data_dir, stride=1)
         elif cfg.dataset == 'kitti_odo':
             kitti_raw_dataset = KITTI_Odo(cfg.raw_base_dir)
-            kitti_raw_dataset.prepare_data_mp(data_dir, stride=1)
+            kitti_raw_dataset.prepare_data_mp(data_dir, stride=2)
         elif cfg.dataset == 'nyuv2':
             nyu_raw_dataset = NYU_Prepare(cfg.raw_base_dir, cfg.nyu_test_dir)
             nyu_raw_dataset.prepare_data_mp(data_dir, stride=10)

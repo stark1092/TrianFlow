@@ -299,7 +299,7 @@ class Model_flow(nn.Module):
     
     def inference_corres(self, img1, img2):
         batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
-        
+
         # get the optical flows and reverse optical flows for each pair of adjacent images
         feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
         optical_flows = self.pwc_model(feature_list_1, feature_list_2, [img_h, img_w])
@@ -317,6 +317,54 @@ class Model_flow(nn.Module):
         
         return optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
 
+    def inference_corres_consist(self, images):
+        img1 = images[0]
+        batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
+        feature_list = []
+        for img in images:
+            feature_list.append(self.fpyramid(img))
+        # get the optical flows and reverse optical flows for each pair of adjacent images
+        # feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
+        optical_flows = self.pwc_model(feature_list[0], feature_list[1], [img_h, img_w])
+        optical_flows_rev = self.pwc_model(feature_list[1], feature_list[0], [img_h, img_w])
+
+        flag_first = True
+        for i in range(len(images)):
+            if i == 0:
+                continue
+            single_optical_flows = self.pwc_model(feature_list[i], feature_list[0], [img_h, img_w])
+            img_visible_masks = self.get_visible_masks_perimage(single_optical_flows)
+            if flag_first:
+                flag_first = False
+                img1_visible_masks = deepcopy(img_visible_masks)
+            else:
+                for j in range(len(img1_visible_masks)):
+                    img1_visible_masks[j] = img1_visible_masks[j] * img_visible_masks[j]
+
+        flag_first = True
+        for i in range(len(images)):
+            if i == 1:
+                continue
+            single_optical_flows = self.pwc_model(feature_list[i], feature_list[1], [img_h, img_w])
+            img_visible_masks = self.get_visible_masks_perimage(single_optical_flows)
+            if flag_first:
+                flag_first = False
+                img2_visible_masks = deepcopy(img_visible_masks)
+            else:
+                for j in range(len(img2_visible_masks)):
+                    img2_visible_masks[j] = img2_visible_masks[j] * single_optical_flows[j]
+        # get occlusion masks
+        # img2_visible_masks, img1_visible_masks = self.get_visible_masks(optical_flows, optical_flows_rev)
+        # get consistent masks
+        img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
+        # get final valid masks 
+        img2_valid_masks, img1_valid_masks = [], []
+        for i, (img2_visible_mask, img1_visible_mask, img2_consis_mask, img1_consis_mask) in enumerate(zip(img2_visible_masks, img1_visible_masks, img2_consis_masks, img1_consis_masks)):
+            img2_valid_masks.append(img2_visible_mask * img2_consis_mask)
+            img1_valid_masks.append(img1_visible_mask * img1_consis_mask)
+        
+        return optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
+    
     def get_visible_masks_perimage(self, optical_flows):
         # get occlusion masks
         batch_size, _, img_h, img_w = optical_flows[0].shape
@@ -329,7 +377,7 @@ class Model_flow(nn.Module):
     def forward(self, inputs, output_flow=False, use_flow_loss=True):
         images, K_ms, K_inv_ms = inputs
         assert (images.shape[1] == 3)
-        stride = 2
+        stride = 3
         img_h, img_w = int(images.shape[2] / stride), images.shape[3]
         img = []
         feature_list = []
@@ -350,7 +398,8 @@ class Model_flow(nn.Module):
             if img1_visible_masks == None:
                 img1_visible_masks = deepcopy(img_visible_masks)
             else:
-                img1_visible_masks = img_visible_masks * img1_visible_masks
+                for j in range(len(img1_visible_masks)):
+                    img1_visible_masks[j] = img_visible_masks[j] * img1_visible_masks[j]
         for i in range(stride):
             if(i == 1):
                 continue
@@ -359,7 +408,8 @@ class Model_flow(nn.Module):
             if img2_visible_masks == None:
                 img2_visible_masks = deepcopy(img_visible_masks)
             else:
-                img2_visible_masks = img_visible_masks * img2_visible_masks        
+                for j in range(len(img1_visible_masks)):
+                    img2_visible_masks[j] = img_visible_masks[j] * img2_visible_masks[j]        
         #cv2.imwrite('./test1.png', np.transpose(255*img1[0].cpu().detach().numpy(), [1,2,0]).astype(np.uint8))
         #cv2.imwrite('./test2.png', np.transpose(255*img2[0].cpu().detach().numpy(), [1,2,0]).astype(np.uint8))
         #pdb.set_trace()
