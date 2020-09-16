@@ -295,7 +295,7 @@ class Model_flow(nn.Module):
         feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
         optical_flow = self.pwc_model(feature_list_1, feature_list_2, img_hw)[0]
         return optical_flow
-    
+
     def inference_corres(self, img1, img2):
         batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
         
@@ -315,12 +315,36 @@ class Model_flow(nn.Module):
             img1_valid_masks.append(img1_visible_mask * img1_consis_mask)
         
         return optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
+    
+    # stride = 1, means only have 2 images. images number is (stride + 1)
+    def get_consist_sequence_masks(self, inputs, stride = 2):
+        images, K_ms, K_inv_ms = inputs
+        assert (images.shape[1] == 3)
+        img_h, img_w = int(images.shape[2] / (stride + 1)), images.shape[3] 
+        img = []
+        feature_list = []
+        for i in range(stride + 1):
+            img.append(images[:,:,img_h * i:img_h * (i + 1),:])
+            feature_list.append(self.fpyramid(img[i]))
+        flag_first = True
+        img1_consis_masks = None
+        for i in range(1, stride + 1):
+            optical_flows = self.pwc_model(feature_list[stride - i], feature_list[stride - i + 1], [img_h, img_w])
+            optical_flows_rev = self.pwc_model(feature_list[stride - i + 1], feature_list[stride - i], [img_h, img_w])
+            if flag_first == False:
+                for j in range(len(optical_flows_rev)):
+                    optical_flows_rev[j] = deepcopy(optical_flows_rev[j]) * img1_consis_masks[j]
+            img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
+
+        return img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid
+
 
     def forward(self, inputs, output_flow=False, use_flow_loss=True):
         images, K_ms, K_inv_ms = inputs
         assert (images.shape[1] == 3)
-        img_h, img_w = int(images.shape[2] / 2), images.shape[3] 
-        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:,:]
+        stride = 2
+        img_h, img_w = int(images.shape[2] / (stride + 1)), images.shape[3] 
+        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:img_h*2,:]
         batch_size = img1.shape[0]
 
         #cv2.imwrite('./test1.png', np.transpose(255*img1[0].cpu().detach().numpy(), [1,2,0]).astype(np.uint8))
@@ -334,7 +358,8 @@ class Model_flow(nn.Module):
         # get occlusion masks
         img2_visible_masks, img1_visible_masks = self.get_visible_masks(optical_flows, optical_flows_rev)
         # get consistent masks
-        img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
+        # img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
+        img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consist_sequence_masks(inputs, stride)
         # get final valid masks 
         img2_valid_masks, img1_valid_masks = [], []
         
