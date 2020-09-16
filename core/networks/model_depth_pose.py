@@ -384,12 +384,12 @@ class Model_depth_pose(nn.Module):
         disp, depth = self.disp2depth(disp_list[0])
         return disp_list[0]
     
-    def infer_vo(self, images, K, K_inv, match_num=6000):
-        b, img_h, img_w = images[0].shape[0], images[0].shape[2], images[0].shape[3]
-        F_final, img1_valid_mask, img1_rigid_mask, fwd_flow, fwd_match = self.model_pose.inference(images, K, K_inv)
+    def infer_vo(self, img1, img2, K, K_inv, match_num=6000):
+        b, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
+        F_final, img1_valid_mask, img1_rigid_mask, fwd_flow, fwd_match = self.model_pose.inference(img1, img2, K, K_inv)
         # infer depth
-        disp1_list = self.depth_net(images[0]) # Nscales * [B, 1, H, W]
-        disp2_list = self.depth_net(images[1])
+        disp1_list = self.depth_net(img1) # Nscales * [B, 1, H, W]
+        disp2_list = self.depth_net(img2)
         disp1, depth1 = self.disp2depth(disp1_list[0])
         disp2, depth2 = self.disp2depth(disp2_list[0])
 

@@ -47,26 +47,17 @@ class KITTI_Prepared(torch.utils.data.Dataset):
         else:
             return self.num_iterations
 
-    def resize_img(self, img, img_hw, stride = 3):
+    def resize_img(self, img, img_hw):
         '''
         Input size (N*H, W, 3)
         Output size (N*H', W', 3), where (H', W') == self.img_hw
         '''
         img_h, img_w = img.shape[0], img.shape[1]
-        img_hw_orig = (int(img_h / stride), img_w)
-        flag = True
-        for i in range(stride):
-            img1 = img[img_hw_orig[0] * i:img_hw_orig[0] * (i + 1), :, :]
-            img1_new = cv2.resize(img1, (img_hw[1], img_hw[0]))
-            if flag:
-                img_new = img1_new
-            else:
-                img_new = np.concatenate([img_new, img1_new], 0)
-            flag = False
-        '''img1, img2 = img[:img_hw_orig[0], :, :], img[img_hw_orig[0]:, :, :]
+        img_hw_orig = (int(img_h / 2), img_w) 
+        img1, img2 = img[:img_hw_orig[0], :, :], img[img_hw_orig[0]:, :, :]
         img1_new = cv2.resize(img1, (img_hw[1], img_hw[0]))
         img2_new = cv2.resize(img2, (img_hw[1], img_hw[0]))
-        img_new = np.concatenate([img1_new, img2_new], 0)'''
+        img_new = np.concatenate([img1_new, img2_new], 0)
         return img_new
 
     def random_flip_img(self, img):

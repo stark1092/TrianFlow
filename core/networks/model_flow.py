@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import numpy as np
 import pdb
 import cv2
-from copy import deepcopy
 
 def transformerFwd(U,
                    flo,
@@ -299,7 +298,7 @@ class Model_flow(nn.Module):
     
     def inference_corres(self, img1, img2):
         batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
-
+        
         # get the optical flows and reverse optical flows for each pair of adjacent images
         feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
         optical_flows = self.pwc_model(feature_list_1, feature_list_2, [img_h, img_w])
@@ -317,109 +316,23 @@ class Model_flow(nn.Module):
         
         return optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
 
-    def inference_corres_consist(self, images):
-        img1 = images[0]
-        batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
-        feature_list = []
-        for img in images:
-            feature_list.append(self.fpyramid(img))
-        # get the optical flows and reverse optical flows for each pair of adjacent images
-        # feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
-        optical_flows = self.pwc_model(feature_list[0], feature_list[1], [img_h, img_w])
-        optical_flows_rev = self.pwc_model(feature_list[1], feature_list[0], [img_h, img_w])
-
-        flag_first = True
-        for i in range(len(images)):
-            if i == 0:
-                continue
-            single_optical_flows = self.pwc_model(feature_list[i], feature_list[0], [img_h, img_w])
-            img_visible_masks = self.get_visible_masks_perimage(single_optical_flows)
-            if flag_first:
-                flag_first = False
-                img1_visible_masks = deepcopy(img_visible_masks)
-            else:
-                for j in range(len(img1_visible_masks)):
-                    img1_visible_masks[j] = img1_visible_masks[j] * img_visible_masks[j]
-
-        flag_first = True
-        for i in range(len(images)):
-            if i == 1:
-                continue
-            single_optical_flows = self.pwc_model(feature_list[i], feature_list[1], [img_h, img_w])
-            img_visible_masks = self.get_visible_masks_perimage(single_optical_flows)
-            if flag_first:
-                flag_first = False
-                img2_visible_masks = deepcopy(img_visible_masks)
-            else:
-                for j in range(len(img2_visible_masks)):
-                    img2_visible_masks[j] = img2_visible_masks[j] * single_optical_flows[j]
-        # get occlusion masks
-        # img2_visible_masks, img1_visible_masks = self.get_visible_masks(optical_flows, optical_flows_rev)
-        # get consistent masks
-        img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
-        # get final valid masks 
-        img2_valid_masks, img1_valid_masks = [], []
-        for i, (img2_visible_mask, img1_visible_mask, img2_consis_mask, img1_consis_mask) in enumerate(zip(img2_visible_masks, img1_visible_masks, img2_consis_masks, img1_consis_masks)):
-            img2_valid_masks.append(img2_visible_mask * img2_consis_mask)
-            img1_valid_masks.append(img1_visible_mask * img1_consis_mask)
-        
-        return optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
-    
-    def get_visible_masks_perimage(self, optical_flows):
-        # get occlusion masks
-        batch_size, _, img_h, img_w = optical_flows[0].shape
-        img_visible_masks = []
-        for s, (optical_flow) in enumerate(optical_flows):
-            shape = [batch_size, 1, int(img_h / (2**s)), int(img_w / (2**s))]
-            img_visible_masks.append(self.get_occlusion_mask_from_flow(shape, optical_flow))
-        return img_visible_masks
-
     def forward(self, inputs, output_flow=False, use_flow_loss=True):
         images, K_ms, K_inv_ms = inputs
         assert (images.shape[1] == 3)
-        stride = 3
-        img_h, img_w = int(images.shape[2] / stride), images.shape[3]
-        img = []
-        feature_list = []
-        for i in range(stride):
-            img.append(images[:,:,(img_h * i):(img_h * (i + 1)),:])
-            feature_list.append(self.fpyramid(img[i]))
-        # img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:,:]
-        batch_size = img[0].shape[0]
-        img1_visible_masks = None
-        img2_visible_masks = None
+        img_h, img_w = int(images.shape[2] / 2), images.shape[3] 
+        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:,:]
+        batch_size = img1.shape[0]
 
-        # get occlusion masks
-        for i in range(stride):
-            if(i == 0):
-                continue
-            optical_flows = self.pwc_model(feature_list[i], feature_list[0], [img_h, img_w])
-            img_visible_masks = self.get_visible_masks_perimage(optical_flows)
-            if img1_visible_masks == None:
-                img1_visible_masks = deepcopy(img_visible_masks)
-            else:
-                for j in range(len(img1_visible_masks)):
-                    img1_visible_masks[j] = img_visible_masks[j] * img1_visible_masks[j]
-        for i in range(stride):
-            if(i == 1):
-                continue
-            optical_flows = self.pwc_model(feature_list[i], feature_list[1], [img_h, img_w])
-            img_visible_masks = self.get_visible_masks_perimage(optical_flows)
-            if img2_visible_masks == None:
-                img2_visible_masks = deepcopy(img_visible_masks)
-            else:
-                for j in range(len(img1_visible_masks)):
-                    img2_visible_masks[j] = img_visible_masks[j] * img2_visible_masks[j]        
         #cv2.imwrite('./test1.png', np.transpose(255*img1[0].cpu().detach().numpy(), [1,2,0]).astype(np.uint8))
         #cv2.imwrite('./test2.png', np.transpose(255*img2[0].cpu().detach().numpy(), [1,2,0]).astype(np.uint8))
         #pdb.set_trace()
         # get the optical flows and reverse optical flows for each pair of adjacent images
-        # feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
-        optical_flows = self.pwc_model(feature_list[0], feature_list[1], [img_h, img_w])
-        optical_flows_rev = self.pwc_model(feature_list[1], feature_list[0], [img_h, img_w])
+        feature_list_1, feature_list_2 = self.fpyramid(img1), self.fpyramid(img2)
+        optical_flows = self.pwc_model(feature_list_1, feature_list_2, [img_h, img_w])
+        optical_flows_rev = self.pwc_model(feature_list_2, feature_list_1, [img_h, img_w])
         
         # get occlusion masks
-        # img2_visible_masks, img1_visible_masks = self.get_visible_masks(optical_flows, optical_flows_rev)
+        img2_visible_masks, img1_visible_masks = self.get_visible_masks(optical_flows, optical_flows_rev)
         # get consistent masks
         img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
         # get final valid masks 
@@ -442,8 +355,8 @@ class Model_flow(nn.Module):
             return loss_pack, optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
 
         # warp images
-        img1_pyramid = self.generate_img_pyramid(img[0], len(optical_flows_rev))
-        img2_pyramid = self.generate_img_pyramid(img[1], len(optical_flows))
+        img1_pyramid = self.generate_img_pyramid(img1, len(optical_flows_rev))
+        img2_pyramid = self.generate_img_pyramid(img2, len(optical_flows))
 
         img1_warped_pyramid = self.warp_flow_pyramid(img2_pyramid, optical_flows)
         img2_warped_pyramid = self.warp_flow_pyramid(img1_pyramid, optical_flows_rev)
@@ -458,7 +371,7 @@ class Model_flow(nn.Module):
         
         #loss_pack['loss_flow_consis'] = self.compute_loss_flow_consis(fwd_flow_diff_pyramid, img1_valid_masks) + \
         #                   self.compute_loss_flow_consis(bwd_flow_diff_pyramid, img2_valid_masks)
-        loss_pack['loss_flow_consis'] = torch.zeros([2]).to(img[0].get_device()).requires_grad_()
+        loss_pack['loss_flow_consis'] = torch.zeros([2]).to(img1.get_device()).requires_grad_()
         if output_flow:
             return loss_pack, optical_flows[0], optical_flows_rev[0], img1_valid_masks[0], img2_valid_masks[0], fwd_flow_diff_pyramid[0], bwd_flow_diff_pyramid[0]
         else:

@@ -126,17 +126,15 @@ class infer_vo():
             images.append(image)
         return images
     
-    def get_prediction(self, images, model, K, K_inv, match_num):
+    def get_prediction(self, img1, img2, model, K, K_inv, match_num):
         # img1: [3,H,W] K: [3,3]
         #visualizer = Visualizer_debug('/home3/zhaow/TrianFlow-pytorch/vis/')
-        n = len(images)
-        input_imgs = []
-        for img in images:
-            input_imgs.append(torch.from_numpy(np.transpose(img / 255.0, [2,0,1])).cuda().float().unsqueeze(0))
+        img1_t = torch.from_numpy(np.transpose(img1 / 255.0, [2,0,1])).cuda().float().unsqueeze(0)
+        img2_t = torch.from_numpy(np.transpose(img2 / 255.0, [2,0,1])).cuda().float().unsqueeze(0)
         K = torch.from_numpy(K).cuda().float().unsqueeze(0)
         K_inv = torch.from_numpy(K_inv).cuda().float().unsqueeze(0)
 
-        filt_depth_match, depth1, depth2 = model.infer_vo(input_imgs, K, K_inv, match_num)
+        filt_depth_match, depth1, depth2 = model.infer_vo(img1_t, img2_t, K, K_inv, match_num)
         return filt_depth_match[0].transpose(0,1).cpu().detach().numpy(), depth1[0].squeeze(0).cpu().detach().numpy(), depth2[0].squeeze(0).cpu().detach().numpy()
 
     
@@ -152,14 +150,9 @@ class infer_vo():
         seq_len = len(images)
         K = self.cam_intrinsics
         K_inv = np.linalg.inv(self.cam_intrinsics)
-        stride = args.stride
         for i in range(seq_len-1):
-            input_imgs = []
-            for j in range(stride + 1):
-                if i + j >= seq_len:
-                    continue
-                input_imgs.append(images[i + j])
-            depth_match, depth1, depth2 = self.get_prediction(input_imgs, model, K, K_inv, match_num=5000)
+            img1, img2 = images[i], images[i+1]
+            depth_match, depth1, depth2 = self.get_prediction(img1, img2, model, K, K_inv, match_num=5000)
             
             rel_pose = np.eye(4)
             flow_pose = self.solve_pose_flow(depth_match[:,:2], depth_match[:,2:])
@@ -176,7 +169,7 @@ class infer_vo():
             global_pose[:3,3:] = np.matmul(global_pose[:3,:3], rel_pose[:3,3:]) + global_pose[:3,3:]
             global_pose[:3,:3] = np.matmul(global_pose[:3,:3], rel_pose[:3,:3])
             poses.append(copy.deepcopy(global_pose))
-            print(i, "/", seq_len)
+            print(i)
         return poses
     
     def normalize_coord(self, xy, K):
@@ -306,7 +299,6 @@ if __name__ == '__main__':
     arg_parser.add_argument('--sequences_root_dir', type=str, default=None, help='directory for test sequences')
     arg_parser.add_argument('--sequence', type=str, default='09', help='Test sequence id.')
     arg_parser.add_argument('--pretrained_model', type=str, default=None, help='directory for loading pretrained models')
-    arg_parser.add_argument('--stride', type=int, default=1, help='image sequence stride')
     args = arg_parser.parse_args()
 
     with open(args.config_file, 'r') as f:
