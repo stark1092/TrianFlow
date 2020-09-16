@@ -318,6 +318,7 @@ class Model_flow(nn.Module):
     
     # stride = 1, means only have 2 images. images number is (stride + 1)
     def get_consist_sequence_masks(self, inputs, stride = 2):
+        # print("use new")
         images, K_ms, K_inv_ms = inputs
         assert (images.shape[1] == 3)
         img_h, img_w = int(images.shape[2] / (stride + 1)), images.shape[3] 
@@ -333,7 +334,16 @@ class Model_flow(nn.Module):
             optical_flows_rev = self.pwc_model(feature_list[stride - i + 1], feature_list[stride - i], [img_h, img_w])
             if flag_first == False:
                 for j in range(len(optical_flows_rev)):
-                    optical_flows_rev[j] = deepcopy(optical_flows_rev[j]) * img1_consis_masks[j]
+                    '''print(optical_flows_rev[j][0][0][0][0])
+                    print(img1_consis_masks[2])
+                    print(optical_flows_rev[j].shape)
+                    print(img1_consis_masks[j].shape)'''
+                    optical_flows_rev[j][:,0,:,:] = optical_flows_rev[j][:,0,:,:].clone() * img1_consis_masks[j]
+                    optical_flows_rev[j][:,1,:,:] = optical_flows_rev[j][:,1,:,:].clone() * img1_consis_masks[j]
+                    '''print(optical_flows_rev[j].shape)
+                    quit(0)'''
+            else:
+                flag_first = False
             img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid = self.get_consistent_masks(optical_flows, optical_flows_rev)
 
         return img2_consis_masks, img1_consis_masks, fwd_flow_diff_pyramid, bwd_flow_diff_pyramid
