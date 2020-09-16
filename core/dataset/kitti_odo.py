@@ -19,10 +19,11 @@ def process_folder(q, data_dir, output_dir, stride=1):
         numbers = len(os.listdir(image_path))
         for n in range(numbers - stride):
             s_idx = n
-            e_idx = s_idx + stride
-            curr_image = imageio.imread(os.path.join(image_path, '%.6d'%s_idx)+'.png')
-            next_image = imageio.imread(os.path.join(image_path, '%.6d'%e_idx)+'.png')
-            seq_images = np.concatenate([curr_image, next_image], axis=0)
+            seq_images = imageio.imread(os.path.join(image_path, '%.6d'%s_idx)+'.png')
+            for i in range(1, stride + 1):
+                e_idx = s_idx + i
+                next_image = imageio.imread(os.path.join(image_path, '%.6d'%e_idx)+'.png')
+                seq_images = np.concatenate([seq_images, next_image], axis=0)
             imageio.imsave(os.path.join(dump_image_path, '%.6d'%s_idx)+'.png', seq_images.astype('uint8'))
 
             # Write training files

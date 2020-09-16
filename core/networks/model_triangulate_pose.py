@@ -56,12 +56,10 @@ class Model_triangulate_pose(nn.Module):
         rigid_score = rigid_mask * 1.0 / (1.0 + dist_map)
         return rigid_mask, inlier_mask, rigid_score
     
-    def inference(self, img1, img2, K, K_inv):
-        batch_size, img_h, img_w = img1.shape[0], img1.shape[2], img1.shape[3]
-        
-        fwd_flow, bwd_flow, img1_valid_mask, img2_valid_mask, img1_flow_diff_mask, img2_flow_diff_mask = self.model_flow.inference_corres(img1, img2)
-        
-        grid = self.meshgrid(img_h, img_w).float().to(img1.get_device()).unsqueeze(0).repeat(batch_size,1,1,1) #[b,2,h,w]
+    def inference(self, images, K, K_inv):
+        batch_size, img_h, img_w = images[0].shape[0], images[0].shape[2], images[0].shape[3]
+        fwd_flow, bwd_flow, img1_valid_mask, img2_valid_mask, img1_flow_diff_mask, img2_flow_diff_mask = self.model_flow.inference_corres_consist(images)
+        grid = self.meshgrid(img_h, img_w).float().to(images[0].get_device()).unsqueeze(0).repeat(batch_size,1,1,1) #[b,2,h,w]        
         corres = torch.cat([(grid[:,0,:,:] + fwd_flow[:,0,:,:]).clamp(0,img_w-1.0).unsqueeze(1), \
             (grid[:,1,:,:] + fwd_flow[:,1,:,:]).clamp(0,img_h-1.0).unsqueeze(1)], 1)
         match = torch.cat([grid, corres], 1) # [b,4,h,w]
@@ -77,8 +75,9 @@ class Model_triangulate_pose(nn.Module):
         images, K_ms, K_inv_ms = inputs
         K, K_inv = K_ms[:,0,:,:], K_inv_ms[:,0,:,:]
         assert (images.shape[1] == 3)
-        img_h, img_w = int(images.shape[2] / 2), images.shape[3] 
-        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:,:]
+        stride = 3
+        img_h, img_w = int(images.shape[2] / stride), images.shape[3] 
+        img1, img2 = images[:,:,:img_h,:], images[:,:,img_h:img_h*2,:]
         batch_size = img1.shape[0]
 
         if self.mode == 'depth':
