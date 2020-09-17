@@ -338,8 +338,8 @@ class Model_flow(nn.Module):
                     print(img1_consis_masks[2])
                     print(optical_flows_rev[j].shape)
                     print(img1_consis_masks[j].shape)'''
-                    optical_flows_rev[j][:,0,:,:] = optical_flows_rev[j][:,0,:,:].clone() * img1_consis_masks[j]
-                    optical_flows_rev[j][:,1,:,:] = optical_flows_rev[j][:,1,:,:].clone() * img1_consis_masks[j]
+                    optical_flows_rev[j][:,0,:,:] = optical_flows_rev[j][:,0,:,:].clone() * img1_consis_masks[j][:,0,:,:].clone()
+                    optical_flows_rev[j][:,1,:,:] = optical_flows_rev[j][:,1,:,:].clone() * img1_consis_masks[j][:,0,:,:].clone()
                     '''print(optical_flows_rev[j].shape)
                     quit(0)'''
             else:
