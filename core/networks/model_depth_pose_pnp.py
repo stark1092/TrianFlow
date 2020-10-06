@@ -11,14 +11,18 @@ import torch.nn.functional as F
 import numpy as np
 import pdb
 
-class Model_depth_pose(nn.Module):
+class Model_depth_pose_pnp(nn.Module):
     def __init__(self, cfg):
-        super(Model_depth_pose, self).__init__()
+        super(Model_depth_pose_pnp, self).__init__()
         self.depth_match_num = cfg.depth_match_num
         self.depth_sample_ratio = cfg.depth_sample_ratio
         self.depth_scale = cfg.depth_scale
         self.w_flow_error = cfg.w_flow_error
         self.dataset = cfg.dataset
+
+        self.PnP_ransac_iter = 1000
+        self.PnP_ransac_thre = 1
+        self.PnP_ransac_times = 5
 
         self.depth_net = Depth_Model(cfg.depth_scale)
         self.model_pose = Model_triangulate_pose(cfg)
@@ -273,6 +277,63 @@ class Model_depth_pose(nn.Module):
         P2 = torch.gather(P2_c, index=idx.unsqueeze(-1).unsqueeze(-1).repeat(1,1,3,4), dim=1).squeeze(1) # [b,3,4]
         #pdb.set_trace()
         return P1, P2
+    
+    def unprojection(self, xy, depth, K):
+        # xy: [N, 2] image coordinates of match points
+        # depth: [N] depth value of match points
+        N = xy.shape[0]
+        # initialize regular grid
+        ones = np.ones((N, 1))
+        xy_h = np.concatenate([xy, ones], axis=1)
+        xy_h = np.transpose(xy_h, (1,0)) # [3, N]
+        #depth = np.transpose(depth, (1,0)) # [1, N]
+        
+        K_inv = np.linalg.inv(K)
+        points = np.matmul(K_inv, xy_h) * depth
+        points = np.transpose(points) # [N, 3]
+        return points
+
+    def solve_pose_pnp(self, xy1, xy2, depth1, K, max_depth = 50.0, min_depth = 0.0):
+        # Use pnp to solve relative poses.
+        # xy1, xy2: [N, 2] depth1: [H, W]
+        img_h, img_w = np.shape(depth1)[0], np.shape(depth1)[1]
+        
+        # Ensure all the correspondences are inside the image.
+        x_idx = (xy2[:, 0] >= 0) * (xy2[:, 0] < img_w)
+        y_idx = (xy2[:, 1] >= 0) * (xy2[:, 1] < img_h)
+        idx = y_idx * x_idx
+        xy1 = xy1[idx]
+        xy2 = xy2[idx]
+
+        xy1_int = xy1.astype(np.int)
+        sample_depth = depth1[xy1_int[:,1], xy1_int[:,0]]
+        valid_depth_mask = (sample_depth < max_depth) * (sample_depth > min_depth)
+
+        xy1 = xy1[valid_depth_mask]
+        xy2 = xy2[valid_depth_mask]
+
+        # Unproject to 3d space
+        points1 = self.unprojection(xy1, sample_depth[valid_depth_mask], K)
+
+        # ransac
+        best_rt = []
+        max_inlier_num = 0
+        max_ransac_iter = self.PnP_ransac_times
+        
+        for i in range(max_ransac_iter):
+            if xy2.shape[0] > 4:
+                flag, r, t, inlier = cv2.solvePnPRansac(objectPoints=points1, imagePoints=xy2, cameraMatrix=K, distCoeffs=None, iterationsCount=self.PnP_ransac_iter, reprojectionError=self.PnP_ransac_thre)
+                if flag and inlier.shape[0] > max_inlier_num:
+                    best_rt = [r, t]
+                    max_inlier_num = inlier.shape[0]
+        pose = np.eye(4)
+        if len(best_rt) != 0:
+            r, t = best_rt
+            pose[:3,:3] = cv2.Rodrigues(r)[0]
+            pose[:3,3:] = t
+        pose = np.linalg.inv(pose)
+        pose[:3,3:] = pose[:3,3:] / np.linalg.norm(pose[:3,3:])
+        return pose[:3,:]
 
     # input of xy: depth_match[:,:2], depth_match[:,2:]
     def solve_pose_flow(self, xy1, xy2):
@@ -307,7 +368,7 @@ class Model_depth_pose(nn.Module):
         pose = [R, t]
         return pose
 
-    def rt_from_pnp(self, fmat, K, depth_match):
+    def rt_from_pnp(self, fmat, K, depth_match, depth1):
         # F: [b, 3, 3] K: [b, 3, 3] depth_match: [b ,4, n]
         verify_match = self.rand_sample(depth_match, 200) # [b,4,100]
         K_inv = torch.inverse(K)
@@ -317,14 +378,10 @@ class Model_depth_pose(nn.Module):
         P1 = K.bmm(iden)
         P2 = []
         for i in range(b):
-            depth_match_local = depth_match[i].transpose(0,1).numpy()
-            pose = self.solve_pose_flow(depth_match_local[:,:2], depth_match_local[:,2:])
-            p2 = torch.from_numpy(np.concatenate(pose, axis=-1)).float().to(K.get_device())
+            depth_match_local = depth_match[i].transpose(0,1).cpu().detach().numpy()
+            pose = self.solve_pose_pnp(depth_match_local[:,:2], depth_match_local[:,2:], depth1, K[i].cpu().detach().numpy())
+            p2 = torch.from_numpy(pose).float().to(K.get_device())
             P2.append(p2)
-        flags = []
-        for i in range(4):
-            flags.append(True)
-        flags = torch.stack(flags, dim=1) # [B, 4]
         P2 = K.bmm(torch.stack(P2, axis=0))
         #pdb.set_trace()
         return P1, P2
@@ -544,7 +601,8 @@ class Model_depth_pose(nn.Module):
             P1, P2, flags = self.rt_from_fundamental_mat_nyu(F_final.detach(), K, depth_match)
             flags = torch.from_numpy(np.stack(flags, axis=0)).float().to(K.get_device())
         else:
-            P1, P2 = self.rt_from_pnp(F_final.detach(), K, depth_match)
+            disp1, depth1 = self.disp2depth(disp1_list[0])
+            P1, P2 = self.rt_from_pnp(F_final.detach(), K, depth_match, depth1[0].squeeze(0).cpu().detach().numpy())
         P1 = P1.detach()
         P2 = P2.detach()
 
