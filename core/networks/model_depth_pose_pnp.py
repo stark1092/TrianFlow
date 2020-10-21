@@ -293,11 +293,26 @@ class Model_depth_pose_pnp(nn.Module):
         points = np.transpose(points) # [N, 3]
         return points
 
+    def unprojection_cuda(self, xy, depth, K):
+        # xy: [N, 2] image coordinates of match points
+        # depth: [N] depth value of match points
+        N = xy.shape[0]
+        # initialize regular grid
+        ones = torch.ones((N, 1)).cuda()
+        xy_h = torch.cat([xy, ones], axis=1)
+        xy_h = xy_h.transpose(1, 0) # [3, N]
+        #depth = np.transpose(depth, (1,0)) # [1, N]
+        
+        K_inv = torch.inverse(K)
+        points = torch.matmul(K_inv, xy_h) * depth
+        points = points.transpose(0, 1) # [N, 3]
+        points = torch.cat([points, ones], axis=1)
+        return points
+
     def solve_pose_pnp(self, xy1, xy2, depth1, K, max_depth = 50.0, min_depth = 0.0):
         # Use pnp to solve relative poses.
         # xy1, xy2: [N, 2] depth1: [H, W]
         img_h, img_w = np.shape(depth1)[0], np.shape(depth1)[1]
-        
         # Ensure all the correspondences are inside the image.
         x_idx = (xy2[:, 0] >= 0) * (xy2[:, 0] < img_w)
         y_idx = (xy2[:, 1] >= 0) * (xy2[:, 1] < img_h)
@@ -319,20 +334,21 @@ class Model_depth_pose_pnp(nn.Module):
         best_rt = []
         max_inlier_num = 0
         max_ransac_iter = self.PnP_ransac_times
-        
+        best_inlier = []
         for i in range(max_ransac_iter):
             if xy2.shape[0] > 4:
                 flag, r, t, inlier = cv2.solvePnPRansac(objectPoints=points1, imagePoints=xy2, cameraMatrix=K, distCoeffs=None, iterationsCount=self.PnP_ransac_iter, reprojectionError=self.PnP_ransac_thre)
                 if flag and inlier.shape[0] > max_inlier_num:
                     best_rt = [r, t]
                     max_inlier_num = inlier.shape[0]
+                    best_inlier = inlier
         pose = np.eye(4)
         if len(best_rt) != 0:
             r, t = best_rt
             pose[:3,:3] = cv2.Rodrigues(r)[0]
             pose[:3,3:] = t
         pose = np.linalg.inv(pose)
-        pose[:3,3:] = pose[:3,3:] / np.linalg.norm(pose[:3,3:])
+        # pose[:3,3:] = pose[:3,3:] / np.linalg.norm(pose[:3,3:])
         return pose[:3,:]
 
     # input of xy: depth_match[:,:2], depth_match[:,2:]
@@ -368,8 +384,8 @@ class Model_depth_pose_pnp(nn.Module):
         pose = [R, t]
         return pose
 
-    def rt_from_pnp(self, fmat, K, depth_match, depth1):
-        # F: [b, 3, 3] K: [b, 3, 3] depth_match: [b ,4, n]
+    def rt_from_pnp(self, fmat, K, depth_match, depth):
+        # F: [b, 3, 3] K: [b, 3, 3] depth_match: [b ,4, n] depth: [b ,1, n]
         verify_match = self.rand_sample(depth_match, 200) # [b,4,100]
         K_inv = torch.inverse(K)
         b = fmat.shape[0]
@@ -379,7 +395,7 @@ class Model_depth_pose_pnp(nn.Module):
         P2 = []
         for i in range(b):
             depth_match_local = depth_match[i].transpose(0,1).cpu().detach().numpy()
-            pose = self.solve_pose_pnp(depth_match_local[:,:2], depth_match_local[:,2:], depth1, K[i].cpu().detach().numpy())
+            pose = self.solve_pose_pnp(depth_match_local[:,:2], depth_match_local[:,2:], depth[i].squeeze(0), K[i].cpu().detach().numpy())
             p2 = torch.from_numpy(pose).float().to(K.get_device())
             P2.append(p2)
         P2 = K.bmm(torch.stack(P2, axis=0))
@@ -602,14 +618,29 @@ class Model_depth_pose_pnp(nn.Module):
             flags = torch.from_numpy(np.stack(flags, axis=0)).float().to(K.get_device())
         else:
             disp1, depth1 = self.disp2depth(disp1_list[0])
-            P1, P2 = self.rt_from_pnp(F_final.detach(), K, depth_match, depth1[0].squeeze(0).cpu().detach().numpy())
+            P1, P2 = self.rt_from_pnp(F_final.detach(), K, depth_match, depth1.cpu().detach().numpy())
         P1 = P1.detach()
         P2 = P2.detach()
+        '''
+        point3d_1 = []
 
+        for i in range(b):
+            xy1 = depth_match[i, :2, :].transpose(0, 1)
+            x_idx = (xy1[:, 0] >= 0) * (xy1[:, 0] < img_w)
+            y_idx = (xy1[:, 1] >= 0) * (xy1[:, 1] < img_h)
+            idx = y_idx * x_idx
+            xy1 = xy1[idx]
+            xy1_long = xy1.long()
+            sample_depth = depth1[i][0][xy1_long[:,1], xy1_long[:,0]]
+            points_3d = self.unprojection_cuda(xy1, sample_depth, K[i])
+            point3d_1.append(points_3d)
+        point3d_1 = torch.stack(point3d_1, 0)
+        print(point3d_1.shape)
         # Get triangulated points
-        filt_depth_match, flag1 = self.ray_angle_filter(depth_match, P1, P2, return_angle=False) # [b, 4, filt_num]
+        # filt_depth_match, flag1 = self.ray_angle_filter(depth_match, P1, P2, return_angle=False) # [b, 4, filt_num]
         
-        point3d_1 = self.midpoint_triangulate(filt_depth_match, K_inv, P1, P2)
+        # point3d_1 = self.midpoint_triangulate(filt_depth_match, K_inv, P1, P2)
+        depth = depth1
         point2d_1_coord, point2d_1_depth = self.reproject(P1, point3d_1) # [b,n,2], [b,n,1]
         point2d_2_coord, point2d_2_depth = self.reproject(P2, point3d_1)
         
@@ -625,7 +656,7 @@ class Model_depth_pose_pnp(nn.Module):
             loss_pack['pj_depth_loss'] = torch.zeros([2]).to(point3d_1.get_device()).requires_grad_()
             loss_pack['flow_error'] = torch.zeros([2]).to(point3d_1.get_device()).requires_grad_()
             loss_pack['depth_smooth_loss'] = torch.zeros([2]).to(point3d_1.get_device()).requires_grad_()
-            return loss_pack
+            return loss_pack'''
 
         pt_depth_loss = 0
         pj_depth_loss = 0
@@ -636,25 +667,27 @@ class Model_depth_pose_pnp(nn.Module):
             disp_pred2 = F.interpolate(disp2_list[s], size=(img_h, img_w), mode='bilinear')
             scaled_disp1, depth_pred1 = self.disp2depth(disp_pred1)
             scaled_disp2, depth_pred2 = self.disp2depth(disp_pred2)
+            # print(disp_pred1.shape)
+            # quit(0)
             # Rescale predicted depth according to triangulated depth
             # [b,1,h,w], [b,n,1]
-            rescaled_pred1, inter_pred1 = self.register_depth(depth_pred1, point2d_1_coord, point2d_1_depth)
-            rescaled_pred2, inter_pred2 = self.register_depth(depth_pred2, point2d_2_coord, point2d_2_depth)
+            # rescaled_pred1, inter_pred1 = self.register_depth(depth_pred1, point2d_1_coord, point2d_1_depth)
+            # rescaled_pred2, inter_pred2 = self.register_depth(depth_pred2, point2d_2_coord, point2d_2_depth)
             # Get Losses
             
-            pt_depth_loss += self.get_trian_loss(point2d_1_depth, inter_pred1) + self.get_trian_loss(point2d_2_depth, inter_pred2)
-            pj_depth, flow_loss = self.get_reproj_fdp_loss(rescaled_pred1, rescaled_pred2, P2, K, K_inv, img1_valid_mask, img1_rigid_mask, fwd_flow, visualizer=visualizer)
+            # pt_depth_loss += self.get_trian_loss(point2d_1_depth, inter_pred1) + self.get_trian_loss(point2d_2_depth, inter_pred2)
+            pj_depth, flow_loss = self.get_reproj_fdp_loss(depth_pred1, depth_pred2, P2, K, K_inv, img1_valid_mask, img1_rigid_mask, fwd_flow, visualizer=visualizer)
             depth_smooth_loss += self.get_smooth_loss(img1, disp_pred1 / (disp_pred1.mean((2,3), True) + 1e-12)) + \
                 self.get_smooth_loss(img2, disp_pred2 / (disp_pred2.mean((2,3), True) + 1e-12))
             pj_depth_loss += pj_depth
             flow_error += flow_loss
-
+        # print(pj_depth_loss.shape)
         if self.dataset == 'nyuv2':
             loss_pack['pt_depth_loss'] = pt_depth_loss * flags
             loss_pack['pj_depth_loss'], loss_pack['flow_error'] = pj_depth_loss * flags, flow_error * flags
             loss_pack['depth_smooth_loss'] = depth_smooth_loss * flags
         else:
-            loss_pack['pt_depth_loss'] = pt_depth_loss
+            # loss_pack['pt_depth_loss'] = pt_depth_loss
             loss_pack['pj_depth_loss'], loss_pack['flow_error'] = pj_depth_loss, flow_error
             loss_pack['depth_smooth_loss'] = depth_smooth_loss
         return loss_pack
