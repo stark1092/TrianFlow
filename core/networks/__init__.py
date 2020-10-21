@@ -3,6 +3,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from model_flow import Model_flow
 from model_triangulate_pose import Model_triangulate_pose
 from model_depth_pose import Model_depth_pose
+from model_depth_pose_pnp import Model_depth_pose_pnp
 from model_flowposenet import Model_flowposenet
 
 def get_model(mode):
@@ -12,6 +13,8 @@ def get_model(mode):
         return Model_triangulate_pose
     elif mode == 'depth' or mode == 'depth_pose':
         return Model_depth_pose
+    elif mode == 'depth_pose_pnp':
+        return Model_depth_pose_pnp
     elif mode == 'flowposenet':
         return Model_flowposenet
     else:
