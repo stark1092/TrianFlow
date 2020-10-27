@@ -10,6 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pdb
+from pointnet2_ops import pointnet2_utils
+sys.path.append("/mnt/code/PnPL/build")
+sys.path.append("/mnt/code/LineMatcher/build")
+import pnpl
+import baseExperiment
 
 class Model_depth_pose_pnp(nn.Module):
     def __init__(self, cfg):
@@ -53,6 +58,35 @@ class Model_depth_pose_pnp(nn.Module):
             select_match = torch.gather(match.transpose(1,2), index=select_idxs.repeat(1,1,4), dim=1).transpose(1,2) # [b, 4, num]
         return select_match, num
 
+    def robust_fps_sample(self, match, mask, num):
+        # match: [b, 4, -1] mask: [b, 1, -1]
+        b, n = match.shape[0], match.shape[2]
+        nonzeros_num = torch.min(torch.sum(mask > 0, dim=-1)) # []
+        if nonzeros_num.detach().cpu().numpy() == n:
+            xyz = torch.zeros(b, 3, n)
+            xyz[:, :2, :] = match[:, :2, :]
+            selected = pointnet2_utils.furthest_point_sample(xyz.detach().cuda().transpose(1,2).contiguous(), num).long()
+            # print("selected: ", selected.shape, selected.dtype)
+            select_match = torch.zeros(b, 4, num).detach().cuda() # [b, 4, num]
+            for i in range(b):
+                select_match[i] = match[i, :, selected[i]]
+        else:
+            # If there is zero score in match, sample the non-zero matches.
+            num = np.minimum(nonzeros_num.detach().cpu().numpy(), num)
+            select_idxs = []
+            for i in range(b):
+                nonzero_idx = torch.nonzero(mask[i,0,:]) # [nonzero_num,1]
+                nonzero_num = nonzero_idx.shape[0]
+                xyz = torch.zeros(1, 3, nonzero_idx.shape[0])
+                xyz[0, :2, :] = match[i, :2, nonzero_idx.reshape(nonzero_num)]
+                selected = pointnet2_utils.furthest_point_sample(xyz.detach().cuda().transpose(1,2).contiguous(), num).long()
+                select_idx = nonzero_idx[selected[0], :] # [num, 1]
+                select_idxs.append(select_idx)
+            select_idxs = torch.stack(select_idxs, 0) # [b,num,1]
+            select_match = torch.gather(match.transpose(1,2), index=select_idxs.repeat(1,1,4), dim=1).transpose(1,2) # [b, 4, num]
+            # print("select match", select_match.shape)
+        return select_match, num
+    
     def top_ratio_sample(self, match, mask, ratio):
         # match: [b, 4, -1] mask: [b, 1, -1]
         b, total_num = match.shape[0], match.shape[-1]
@@ -351,6 +385,71 @@ class Model_depth_pose_pnp(nn.Module):
         # pose[:3,3:] = pose[:3,3:] / np.linalg.norm(pose[:3,3:])
         return pose[:3,:]
 
+    '''def filtliens(self, depth1, linematches):
+        # Use pnp to solve relative poses.
+        # xy1, xy2: [N, 2] depth1: [H, W]
+
+        img_h, img_w = np.shape(depth1)[0], np.shape(depth1)[1]
+        
+        
+        start_xy1 = linematches[:, :2]
+        end_xy1 = linematches[:, 2:4]
+        start_xy2 = linematches[:, 4:6]
+        end_xy2 = linematches[:, 6:8]
+        # print("start_xy1: ", start_xy1.shape)
+        # print("end_xy1: ", end_xy1.shape)
+        start_xy1_int = start_xy1.astype(np.int)
+        start_sample_depth = depth1[start_xy1_int[:,1],start_xy1_int[:,0]]
+        
+        end_xy1_int = end_xy1.astype(np.int)
+        end_sample_depth = depth1[end_xy1_int[:,1], end_xy1_int[:,0]]
+
+
+        # Unproject to 3d space
+
+        start_points1 = self.unprojection(start_xy1, start_sample_depth, self.cam_intrinsics)
+        end_points1 = self.unprojection(end_xy1, end_sample_depth, self.cam_intrinsics)
+        lines_3d = np.hstack((start_points1, end_points1))
+        lines_2d = linematches[:, 4:]
+        return lines_3d, lines_2d'''
+    
+    def solve_pose_pnpl_g2o(self, xy1, xy2, depth1, K, max_depth = 50.0, min_depth = 0.0):
+        # Use pnp to solve relative poses.
+        # xy1, xy2: [N, 2] depth1: [H, W]
+        img_h, img_w = np.shape(depth1)[0], np.shape(depth1)[1]
+        
+        # Ensure all the correspondences are inside the image.
+        x_idx = (xy2[:, 0] >= 0) * (xy2[:, 0] < img_w)
+        y_idx = (xy2[:, 1] >= 0) * (xy2[:, 1] < img_h)
+        idx = y_idx * x_idx
+        xy1 = xy1[idx]
+        xy2 = xy2[idx]
+
+        xy1_int = xy1.astype(np.int)
+        sample_depth = depth1[xy1_int[:,1], xy1_int[:,0]]
+        valid_depth_mask = (sample_depth < max_depth) * (sample_depth > min_depth)
+        xy1 = xy1[valid_depth_mask]
+        xy2 = xy2[valid_depth_mask]
+        pose = np.eye(4)
+        # Unproject to 3d space
+        points1 = self.unprojection(xy1, sample_depth[valid_depth_mask], K)
+        # lines3d, lines2d = self.filtliens(depth1, linematches)
+        pose[:3, :] = pnpl.getPose(np.array(points1, order='C'), np.array(xy2, order='C'), np.zeros((0, 0)), np.zeros((0, 0)), np.array(K, order='C'))
+        pose = np.linalg.inv(pose)
+        return pose[:3,:]
+    
+    def get_line_matches(self, img1s, img2s):
+        # Use pnp to solve relative poses.
+        b = img1s.shape[0]
+        linematches = []
+        for i in range(b):
+            print("Extract:")
+            linematches.append(baseExperiment.ExtractLineMatches(img1s[i], img2s[i]))
+            print("Finish")
+            quit(0)
+        linematches = np.array(linematches)
+        return linematches
+    
     # input of xy: depth_match[:,:2], depth_match[:,2:]
     def solve_pose_flow(self, xy1, xy2):
         # Solve essential matrix to find relative pose from flow.
@@ -395,7 +494,8 @@ class Model_depth_pose_pnp(nn.Module):
         P2 = []
         for i in range(b):
             depth_match_local = depth_match[i].transpose(0,1).cpu().detach().numpy()
-            pose = self.solve_pose_pnp(depth_match_local[:,:2], depth_match_local[:,2:], depth[i].squeeze(0), K[i].cpu().detach().numpy())
+            pose = self.solve_pose_pnpl_g2o(depth_match_local[:,:2], depth_match_local[:,2:], depth[i].squeeze(0), K[i].cpu().detach().numpy())
+            #pose = self.solve_pose_pnp(depth_match_local[:,:2], depth_match_local[:,2:], depth[i].squeeze(0), K[i].cpu().detach().numpy())
             p2 = torch.from_numpy(pose).float().to(K.get_device())
             P2.append(p2)
         P2 = K.bmm(torch.stack(P2, axis=0))
@@ -524,7 +624,7 @@ class Model_depth_pose_pnp(nn.Module):
         img1_depth_mask = img1_rigid_mask * img1_valid_mask
         # [b, 4, match_num]
         top_ratio_match, top_ratio_mask = self.top_ratio_sample(fwd_match.view([b,4,-1]), img1_depth_mask.view([b,1,-1]), ratio=0.30) # [b, 4, ratio*h*w]
-        depth_match, depth_match_num = self.robust_rand_sample(top_ratio_match, top_ratio_mask, num=match_num)
+        depth_match, depth_match_num = self.robust_fps_sample(top_ratio_match, top_ratio_mask, num=match_num)
         return depth_match, depth1, depth2
     
     def check_rt(self, img1, img2, K, K_inv):
@@ -542,7 +642,7 @@ class Model_depth_pose_pnp(nn.Module):
 
         # Select top score matches to triangulate depth.
         top_ratio_match, top_ratio_mask = self.top_ratio_sample(fwd_match.view([b,4,-1]), img1_depth_mask.view([b,1,-1]), ratio=0.20) # [b, 4, ratio*h*w]
-        depth_match, depth_match_num = self.robust_rand_sample(top_ratio_match, top_ratio_mask, num=self.depth_match_num)
+        depth_match, depth_match_num = self.robust_fps_sample(top_ratio_match, top_ratio_mask, num=self.depth_match_num)
 
         P1, P2, flags = self.rt_from_fundamental_mat_nyu(F_final.detach(), K, depth_match)
         P1 = P1.detach()
@@ -567,7 +667,7 @@ class Model_depth_pose_pnp(nn.Module):
         img1_depth_mask = img1_rigid_mask * img1_valid_mask
         # [b, 4, match_num]
         top_ratio_match, top_ratio_mask = self.top_ratio_sample(fwd_match.view([b,4,-1]), img1_depth_mask.view([b,1,-1]), ratio=0.20) # [b, 4, ratio*h*w]
-        depth_match, depth_match_num = self.robust_rand_sample(top_ratio_match, top_ratio_mask, num=self.depth_match_num)
+        depth_match, depth_match_num = self.robust_fps_sample(top_ratio_match, top_ratio_mask, num=self.depth_match_num)
         if self.dataset == 'nyuv2':
             P1, P2, _ = self.rt_from_fundamental_mat_nyu(F_final, K, depth_match)
         else:
@@ -611,7 +711,7 @@ class Model_depth_pose_pnp(nn.Module):
         
         # Select top score matches to triangulate depth.
         top_ratio_match, top_ratio_mask = self.top_ratio_sample(fwd_match.view([b,4,-1]), img1_depth_mask.view([b,1,-1]), ratio=self.depth_sample_ratio) # [b, 4, ratio*h*w]
-        depth_match, depth_match_num = self.robust_rand_sample(top_ratio_match, top_ratio_mask, num=self.depth_match_num)
+        depth_match, depth_match_num = self.robust_fps_sample(top_ratio_match, top_ratio_mask, num=self.depth_match_num)
         
         if self.dataset == 'nyuv2':
             P1, P2, flags = self.rt_from_fundamental_mat_nyu(F_final.detach(), K, depth_match)
